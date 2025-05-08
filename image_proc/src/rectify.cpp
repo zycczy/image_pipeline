@@ -39,6 +39,8 @@
 
 #include <image_proc/rectify.hpp>
 #include <image_proc/utils.hpp>
+#include <image_proc/hal/rectify_hal.hpp>
+#include "dmabuf_transport/type/image.hpp"
 
 #include <image_transport/image_transport.hpp>
 #include <opencv2/imgproc.hpp>
@@ -62,105 +64,93 @@ RectifyNode::RectifyNode(const rclcpp::NodeOptions & options)
 
   queue_size_ = this->declare_parameter("queue_size", 5);
   interpolation_ = this->declare_parameter("interpolation", 1);
+  vendor_name_ = this->declare_parameter("vendor", "default");
 
-  // Setup lazy subscriber using publisher connection callback
-  rclcpp::PublisherOptions pub_options;
-  pub_options.event_callbacks.matched_callback =
-    [this](rclcpp::MatchedInfo &)
-    {
-      if (pub_rect_.getNumSubscribers() == 0) {
-        sub_camera_.shutdown();
-      } else if (!sub_camera_) {
-        // Create subscriber with QoS matched to subscribed topic publisher
-        auto qos_profile = getTopicQosProfile(this, image_topic_);
-        image_transport::TransportHints hints(this);
-        sub_camera_ = image_transport::create_camera_subscription(
-          this, image_topic_, std::bind(
-            &RectifyNode::imageCb,
-            this, std::placeholders::_1, std::placeholders::_2), hints.getTransport(), qos_profile);
-      }
-    };
+  RCLCPP_INFO(this->get_logger(), "Initializing Rectify node with vendor: %s", vendor_name_.c_str());
 
-  // Create publisher - allow overriding QoS settings (history, depth, reliability)
-  pub_options.qos_overriding_options = rclcpp::QosOverridingOptions::with_default_policies();
-  pub_rect_ = image_transport::create_publisher(this, "image_rect", rmw_qos_profile_default,
-      pub_options);
+  // Create the HAL implementation based on vendor name
+  hal_ = hal::RectifyHAL::create(vendor_name_, this, interpolation_);
+  if (!hal_) {
+    RCLCPP_ERROR(this->get_logger(), "Failed to create HAL implementation for vendor: %s", vendor_name_.c_str());
+    return;
+  }
+  
+  
+  // Set up lazy subscriptions (activated only when someone subscribes to our publisher)
+  auto qos_profile = getTopicQosProfile(this, image_topic_);
+  // Convert rmw_qos_profile_s to rclcpp::QoS
+  rclcpp::QoS qos = rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(qos_profile), qos_profile);
+  
+  subscription_handle_ = hal::RectifyHAL::SubscriptionHandle();
+
+  
+  // Start with subscriptions active by default
+  setup_lazy_subscriptions(qos);
 }
 
-void RectifyNode::imageCb(
-  const sensor_msgs::msg::Image::ConstSharedPtr & image_msg,
+void RectifyNode::setup_lazy_subscriptions(const rclcpp::QoS& qos_profile)
+{
+  // Skip if subscriptions are already set up
+  if (subscription_handle_.camera_sub || subscription_handle_.specialized_sub) {
+    RCLCPP_DEBUG(this->get_logger(), "Subscriptions already set up, skipping");
+    return;
+  }
+  
+  RCLCPP_INFO(this->get_logger(), "Setting up subscriptions for %s", image_topic_.c_str());
+  
+  // Create camera info subscription for specialized message types if needed
+
+  auto camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
+    "camera_info", 10,
+    [this](const sensor_msgs::msg::CameraInfo::ConstSharedPtr & msg) {
+      latest_camera_info_ = msg;
+    });
+  
+  // Create transport hints for image transport
+  image_transport::TransportHints hints(this);
+  
+  // Use the HAL's unified subscription setup method
+  // This will create both standard and specialized subscriptions as needed
+  subscription_handle_ = hal_->setupSubscriptions(
+    this,
+    image_topic_,
+    // callback (gets converted to specific type inside HAL)
+    std::bind(&RectifyNode::ImageCb, this,
+              std::placeholders::_1, std::placeholders::_2),
+    hints.getTransport(),
+    qos_profile);
+    
+  if (!subscription_handle_.camera_sub && !subscription_handle_.specialized_sub) {
+    RCLCPP_ERROR(this->get_logger(), "Failed to set up any subscriptions!");
+  } else {
+    RCLCPP_INFO(this->get_logger(), "Successfully set up subscriptions");
+  }
+}
+
+sensor_msgs::msg::CameraInfo::ConstSharedPtr RectifyNode::get_latest_camera_info()
+{
+  // This is a helper method to get the latest camera info for specialized message types
+  return latest_camera_info_;
+}
+
+void RectifyNode::ImageCb(
+  const std::shared_ptr<void> & image_msg_void,
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & info_msg)
 {
-  TRACEPOINT(
-    image_proc_rectify_init,
-    static_cast<const void *>(this),
-    static_cast<const void *>(&(*image_msg)),
-    static_cast<const void *>(&(*info_msg)));
-
-  if (pub_rect_.getNumSubscribers() < 1) {
-    TRACEPOINT(
-      image_proc_rectify_fini,
-      static_cast<const void *>(this),
-      static_cast<const void *>(&(*image_msg)),
-      static_cast<const void *>(&(*info_msg)));
-
+  // If no info message is provided, try to use the latest one
+  auto actual_info_msg = info_msg ? info_msg : get_latest_camera_info();
+  
+  if (!actual_info_msg) {
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(), 
+      *this->get_clock(), 
+      1000,  // Throttle to once per second
+      "No camera info available for specialized message");
     return;
   }
 
-  // Verify camera is actually calibrated
-  if (info_msg->k[0] == 0.0) {
-    RCLCPP_ERROR(
-      this->get_logger(), "Rectified topic '%s' requested but camera publishing '%s' "
-      "is uncalibrated", pub_rect_.getTopic().c_str(), sub_camera_.getInfoTopic().c_str());
-    TRACEPOINT(
-      image_proc_rectify_fini,
-      static_cast<const void *>(this),
-      static_cast<const void *>(&(*image_msg)),
-      static_cast<const void *>(&(*info_msg)));
-    return;
-  }
-
-  // If zero distortion, just pass the message along
-  bool zero_distortion = true;
-
-  for (size_t i = 0; i < info_msg->d.size(); ++i) {
-    if (info_msg->d[i] != 0.0) {
-      zero_distortion = false;
-      break;
-    }
-  }
-
-  // This will be true if D is empty/zero sized
-  if (zero_distortion) {
-    pub_rect_.publish(image_msg);
-    TRACEPOINT(
-      image_proc_rectify_fini,
-      static_cast<const void *>(this),
-      static_cast<const void *>(&(*image_msg)),
-      static_cast<const void *>(&(*info_msg)));
-    return;
-  }
-
-  // Update the camera model
-  model_.fromCameraInfo(info_msg);
-
-  // Create cv::Mat views onto both buffers
-  const cv::Mat image = cv_bridge::toCvShare(image_msg)->image;
-  cv::Mat rect;
-
-  // Rectify and publish
-  model_.rectifyImage(image, rect, interpolation_);
-
-  // Allocate new rectified image message
-  auto rect_msg = std::make_unique<sensor_msgs::msg::Image>();
-  cv_bridge::CvImage(image_msg->header, image_msg->encoding, rect).toImageMsg(*rect_msg);
-  pub_rect_.publish(std::move(rect_msg));
-
-  TRACEPOINT(
-    image_proc_rectify_fini,
-    static_cast<const void *>(this),
-    static_cast<const void *>(&(*image_msg)),
-    static_cast<const void *>(&(*info_msg)));
+  // Delegate message handling to HAL, which will handle type and vendor specifics
+  hal_->imageCb(this, image_msg_void, actual_info_msg, model_, interpolation_);
 }
 
 }  // namespace image_proc

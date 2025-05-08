@@ -35,8 +35,12 @@
 
 #include <mutex>
 #include <string>
+#include <type_traits>
+#include <vector>
 
 #include "image_geometry/pinhole_camera_model.hpp"
+#include "image_proc/hal/rectify_hal.hpp"
+#include "dmabuf_transport/type/image.hpp"
 
 #include <image_transport/image_transport.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -53,18 +57,37 @@ public:
   explicit RectifyNode(const rclcpp::NodeOptions &);
 
 private:
-  image_transport::CameraSubscriber sub_camera_;
-
+  // Subscription state
+  hal::RectifyHAL::SubscriptionHandle subscription_handle_;
+  sensor_msgs::msg::CameraInfo::ConstSharedPtr latest_camera_info_;
+  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
+  
+  // Configuration parameters
   int queue_size_;
   int interpolation_;
   std::string image_topic_;
+  std::string vendor_name_;
+  
+  // Publishers
   image_transport::Publisher pub_rect_;
+  std::vector<std::shared_ptr<void>> specialized_publishers_;
+  
+  // HAL implementation
+  hal::RectifyHAL::SharedPtr hal_;
 
   // Processing state (note: only safe because we're using single-threaded NodeHandle!)
   image_geometry::PinholeCameraModel model_;
 
-  void imageCb(
-    const sensor_msgs::msg::Image::ConstSharedPtr & image_msg,
+  // Helper method to get the latest camera info for specialized message types
+  sensor_msgs::msg::CameraInfo::ConstSharedPtr get_latest_camera_info();
+  
+  // Handle lazy subscription setup
+  void setup_lazy_subscriptions(const rclcpp::QoS& qos_profile);
+
+    
+  // Direct void* message callback for specialized messages
+  void ImageCb(
+    const std::shared_ptr<void> & image_msg_void,
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr & info_msg);
 };
 

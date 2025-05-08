@@ -28,7 +28,10 @@ target_link_libraries(${PROJECT_NAME}
 
 # rectify component and node
 ament_auto_add_library(rectify SHARED
-  src/rectify.cpp)
+  src/rectify.cpp
+  src/hal/rectify_hal.cpp
+  src/hal/qrb-ros/rectify_qrb_ros.cpp
+  src/hal/opencv/rectify_opencv.cpp)
 target_compile_definitions(rectify
   PRIVATE "COMPOSITION_BUILDING_DLL"
 )
