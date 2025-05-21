@@ -105,6 +105,15 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   target_link_libraries(image_proc "stdc++fs")
 endif()
 
+include_directories(
+  ${OpenCV_INCLUDE_DIRS}
+  ${ament_cmake_INCLUDE_DIRS}
+  ${rclcpp_INCLUDE_DIRS}
+  ${image_geometry_INCLUDE_DIRS}
+  ${image_transport_INCLUDE_DIRS}
+  ${sensor_msgs_INCLUDE_DIRS}
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()

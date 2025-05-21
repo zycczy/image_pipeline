@@ -32,6 +32,7 @@ image_transport::Publisher RectifyOpenCV::createPublisher(
   const rclcpp::PublisherOptions & options)
 {
   // Create standard image_transport publisher
+  (void)options;
   RCLCPP_DEBUG(node->get_logger(), "Creating standard image publisher for %s", topic.c_str());
   return image_transport::create_publisher(node, topic, qos_profile);
 }

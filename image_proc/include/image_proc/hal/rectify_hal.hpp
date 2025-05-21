@@ -78,17 +78,6 @@ public:
     
     return handle;
   }
-  
-  // 图像回调处理 - 子类将特化此模板
-  template<typename MsgT>
-  void imageCb(
-    rclcpp::Node * node,
-    const typename MsgT::ConstSharedPtr & image_msg,
-    const sensor_msgs::msg::CameraInfo::ConstSharedPtr & info_msg,
-    image_geometry::PinholeCameraModel & model,
-    int interpolation)
-  {
-  }
 
   // 新增虚函数，统一入口，参数为void指针，由子类自行判断类型
   virtual void imageCb(
@@ -98,6 +87,10 @@ public:
     image_geometry::PinholeCameraModel & model,
     int interpolation)
   {
+    (void)image_msg_void;
+    (void)info_msg;
+    (void)model;
+    (void)interpolation;
     // 默认实现：警告未实现
     RCLCPP_WARN(node->get_logger(), "RectifyHAL::imageCb() not implemented for this vendor/type");
   }
